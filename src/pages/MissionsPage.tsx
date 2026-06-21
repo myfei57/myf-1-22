@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Swords,
@@ -17,15 +17,19 @@ import {
   AlertTriangle,
   RotateCcw,
   History,
+  PlusCircle,
 } from 'lucide-react';
 import { PageContainer } from '../components/PageContainer';
 import { RobotCard } from '../components/RobotCard';
 import { StatBar } from '../components/StatBar';
 import { Modal } from '../components/Modal';
+import { DispatchQueue } from '../components/DispatchQueue';
 import { useGameStore } from '../store/useGameStore';
 import { MISSIONS } from '../data/defaultConfig';
-import { formatDate } from '../utils/helpers';
-import type { MissionType, Robot, Mission, MissionRecord } from '../types';
+import { formatDate, generateId } from '../utils/helpers';
+import type { MissionType, Robot, Mission, MissionRecord, QueueItem } from '../types';
+
+const MIN_ADAPTABILITY = 15;
 
 const missionIcons: Record<MissionType, typeof Package> = {
   transport: Truck,
@@ -75,6 +79,10 @@ export function MissionsPage() {
   const executeMission = useGameStore((s) => s.executeMission);
   const config = useGameStore((s) => s.config);
 
+  const [queue, setQueue] = useState<QueueItem[]>([]);
+  const [isQueueRunning, setIsQueueRunning] = useState(false);
+  const isQueueRunningRef = useRef(false);
+
   const availableRobots = useMemo(() => {
     return robots.filter((r) => r.durability > 0);
   }, [robots]);
@@ -98,12 +106,134 @@ export function MissionsPage() {
     }, 2000);
   };
 
+  const handleAddToQueue = () => {
+    if (!selectedRobot || !selectedMission) return;
+    const preview = calculateAdaptability(selectedRobot, selectedMission);
+    const item: QueueItem = {
+      id: generateId(),
+      robotId: selectedRobot.id,
+      robotName: selectedRobot.name,
+      missionId: selectedMission.id,
+      missionName: selectedMission.name,
+      missionType: selectedMission.type,
+      status: 'waiting',
+      adaptabilityPreview: preview,
+      createdAt: Date.now(),
+    };
+    setQueue((prev) => [...prev, item]);
+  };
+
+  const handleRemoveQueueItem = (id: string) => {
+    setQueue((prev) => prev.filter((it) => it.id !== id));
+  };
+
+  const handleClearQueue = () => {
+    setQueue([]);
+  };
+
+  const handleResetQueue = () => {
+    setQueue((prev) =>
+      prev.map((it) =>
+        it.status === 'completed' || it.status === 'skipped'
+          ? {
+              ...it,
+              status: 'waiting',
+              skipReason: undefined,
+              result: undefined,
+              executedAt: undefined,
+            }
+          : it
+      )
+    );
+  };
+
+  const updateQueueItem = useCallback(
+    (id: string, updates: Partial<QueueItem>) => {
+      setQueue((prev) => prev.map((it) => (it.id === id ? { ...it, ...updates } : it)));
+    },
+    []
+  );
+
+  const handleStartQueue = async () => {
+    if (isQueueRunningRef.current) return;
+    const pendingIds = queue
+      .filter((it) => it.status === 'waiting')
+      .map((it) => ({ id: it.id, robotId: it.robotId, missionId: it.missionId }));
+
+    if (pendingIds.length === 0) return;
+
+    isQueueRunningRef.current = true;
+    setIsQueueRunning(true);
+
+    for (const { id, robotId, missionId } of pendingIds) {
+      updateQueueItem(id, { status: 'executing', skipReason: undefined, result: undefined });
+
+      await new Promise((resolve) => setTimeout(resolve, 900));
+
+      const state = useGameStore.getState();
+      const robot = state.robots.find((r) => r.id === robotId);
+      const mission = MISSIONS.find((m) => m.id === missionId);
+
+      if (!robot || !mission) {
+        updateQueueItem(id, {
+          status: 'skipped',
+          skipReason: '机器人或任务不存在',
+          executedAt: Date.now(),
+        });
+        continue;
+      }
+
+      const currentAdaptability = state.calculateAdaptability(robot, mission);
+
+      if (robot.durability <= 0) {
+        updateQueueItem(id, {
+          status: 'skipped',
+          skipReason: '耐久度为零',
+          adaptabilityPreview: currentAdaptability,
+          executedAt: Date.now(),
+        });
+        continue;
+      }
+
+      if (robot.isOverloaded) {
+        updateQueueItem(id, {
+          status: 'skipped',
+          skipReason: '机器人处于过载状态',
+          adaptabilityPreview: currentAdaptability,
+          executedAt: Date.now(),
+        });
+        continue;
+      }
+
+      if (currentAdaptability < MIN_ADAPTABILITY) {
+        updateQueueItem(id, {
+          status: 'skipped',
+          skipReason: `适配度过低(${currentAdaptability}%)`,
+          adaptabilityPreview: currentAdaptability,
+          executedAt: Date.now(),
+        });
+        continue;
+      }
+
+      const result = state.executeMission(robot.id, mission.id);
+      updateQueueItem(id, {
+        status: 'completed',
+        result,
+        adaptabilityPreview: result.adaptability,
+        executedAt: Date.now(),
+      });
+    }
+
+    isQueueRunningRef.current = false;
+    setIsQueueRunning(false);
+  };
+
   const successRate = Math.min(95, Math.max(10, adaptability));
 
   return (
     <PageContainer
       title="任务派遣"
-      subtitle={`可用机器人: ${availableRobots.length} | 已完成任务: ${missionRecords.filter((r) => r.success).length}`}
+      subtitle={`可用机器人: ${availableRobots.length} | 已完成任务: ${missionRecords.filter((r) => r.success).length} | 队列: ${queue.length} 条`}
       actions={
         <button onClick={() => setShowHistory(true)} className="btn btn-secondary">
           <History className="w-4 h-4 mr-2" />
@@ -294,11 +424,11 @@ export function MissionsPage() {
                     </div>
                   )}
 
-                  <div className="flex justify-center">
+                  <div className="flex justify-center gap-3 flex-wrap">
                     <button
                       onClick={handleExecuteMission}
-                      disabled={isExecuting}
-                      className="btn btn-primary px-8"
+                      disabled={isExecuting || isQueueRunning}
+                      className="btn btn-primary px-6"
                     >
                       {isExecuting ? (
                         <>
@@ -311,6 +441,14 @@ export function MissionsPage() {
                           开始任务
                         </>
                       )}
+                    </button>
+                    <button
+                      onClick={handleAddToQueue}
+                      disabled={isExecuting || isQueueRunning}
+                      className="btn btn-secondary px-6 disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      <PlusCircle className="w-4 h-4 mr-2" />
+                      加入队列
                     </button>
                   </div>
                 </motion.div>
@@ -383,6 +521,17 @@ export function MissionsPage() {
             </div>
           )}
         </div>
+      </div>
+
+      <div className="mt-6">
+        <DispatchQueue
+          items={queue}
+          isRunning={isQueueRunning}
+          onStart={handleStartQueue}
+          onClear={handleClearQueue}
+          onReset={handleResetQueue}
+          onRemove={handleRemoveQueueItem}
+        />
       </div>
 
       <Modal

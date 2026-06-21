@@ -70,6 +70,23 @@ export interface MissionRecord {
   completedAt: number;
 }
 
+export type QueueItemStatus = 'waiting' | 'executing' | 'completed' | 'skipped';
+
+export interface QueueItem {
+  id: string;
+  robotId: string;
+  robotName: string;
+  missionId: string;
+  missionName: string;
+  missionType: MissionType;
+  status: QueueItemStatus;
+  adaptabilityPreview: number;
+  skipReason?: string;
+  result?: MissionRecord;
+  createdAt: number;
+  executedAt?: number;
+}
+
 export interface RepairRecord {
   id: string;
   robotId: string;
